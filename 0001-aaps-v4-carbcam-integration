@@ -1,0 +1,220 @@
+From c62d3fc2e5c36c8c03bca27b5ad99b50b872d0b7 Mon Sep 17 00:00:00 2001
+From: 10BE Software UG <support@ns.10be.de>
+Date: Tue, 2 Jun 2026 00:44:47 +0200
+Subject: [PATCH] Allow 10BE CarbCam to open the Bolus Wizard with prefilled
+ carbs
+
+AAPS 4 DEV from:
+7734facd Milos Kozak <m.kozak@sysop.cz> on 01.06.2026 at 23:02
+Maybe newer one wont work if the linenumber changed...
+
+
+Adds a small, whitelisted external entry point that lets 10BE CarbCam
+(package de.be10.carbcam) open the AAPS V4 Compose Bolus Wizard with
+the carbs (and optional notes) field prefilled.
+
+Design notes:
+
+  * Caller package is verified against a hard-coded whitelist in
+    WizardLaunchActivity. Any other caller is silently rejected.
+  * Carbs are bounds-checked to 1..80 g; out-of-range values are
+    silently rejected. Larger meals can be adjusted manually in the
+    wizard afterwards.
+  * The launcher activity only forwards the value to
+    ComposeMainActivity via internal Intent extras (external_carbs,
+    external_notes, external_source). ComposeMainActivity routes them
+    via NavController to the existing AppRoute.WizardDialog which
+    already accepts carbs and notes as nav arguments (used today by
+    the food management screen). The Wizard ViewModel reads these
+    from SavedStateHandle and prefills the UI state.
+  * All confirmation dialogs, safety checks and bolus logic remain
+    completely unchanged.
+  * No insulin is ever delivered without the standard wizard
+    confirmation flow.
+
+Cold-start safe: the pending carbs intent is held in a mutableStateOf
+property on ComposeMainActivity, so the AppContent composable picks
+it up via LaunchedEffect once the NavHostController is ready,
+regardless of whether the intent arrived during cold start or while
+the app was already running.
+
+The intent extras are explicitly removed after consumption so that a
+configuration change (rotation, theme change) does not re-trigger
+navigation to the wizard.
+
+Intent contract:
+
+  action  : info.nightscout.androidaps.action.OPEN_BOLUS_WIZARD
+  extras  : carbs  (int,    required, 1..80, grams)
+            notes  (string, optional)
+            source (string, optional, free-form caller tag)
+
+Target branch: nightscout/AndroidAPS dev (4.x)
+---
+ app/src/main/AndroidManifest.xml              | 12 ++++
+ .../kotlin/app/aaps/ComposeMainActivity.kt    | 31 +++++++++
+ .../aaps/activities/WizardLaunchActivity.kt   | 67 +++++++++++++++++++
+ 3 files changed, 110 insertions(+)
+ create mode 100644 app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 199a397ae2..9687753327 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -73,6 +73,18 @@
+                 <category android:name="android.intent.category.LAUNCHER" />
+             </intent-filter>
+         </activity>
++
++        <activity
++            android:name="app.aaps.activities.WizardLaunchActivity"
++            android:exported="true"
++            android:excludeFromRecents="true"
++            android:launchMode="singleInstance"
++            android:theme="@style/AppTheme.NoActionBar">
++            <intent-filter>
++                <action android:name="info.nightscout.androidaps.action.OPEN_BOLUS_WIZARD" />
++                <category android:name="android.intent.category.DEFAULT" />
++            </intent-filter>
++        </activity>
+         <!-- Receive new BG readings from other local apps -->
+         <receiver
+             android:name="app.aaps.receivers.DataReceiver"
+diff --git a/app/src/main/kotlin/app/aaps/ComposeMainActivity.kt b/app/src/main/kotlin/app/aaps/ComposeMainActivity.kt
+index e53d6a8172..53664b87c7 100644
+--- a/app/src/main/kotlin/app/aaps/ComposeMainActivity.kt
++++ b/app/src/main/kotlin/app/aaps/ComposeMainActivity.kt
+@@ -243,6 +243,9 @@ class ComposeMainActivity : AppCompatActivity() {
+     private val _autoShowNotifications = mutableStateOf(false)
+     private val disposable = CompositeDisposable()
+ 
++    // CarbCam: pending carbs from external Intent (via WizardLaunchActivity), consumed by AppContent
++    private val pendingCarbsIntent = mutableStateOf<Pair<Int, String?>?>(null)
++
+     override fun onCreate(savedInstanceState: Bundle?) {
+         // Bar icon color is kept in sync with the AAPS-effective theme reactively
+         // from inside AapsTheme via a SideEffect on WindowInsetsControllerCompat,
+@@ -289,11 +292,31 @@ class ComposeMainActivity : AppCompatActivity() {
+ 
+         observePreferences()
+ 
++        consumeExternalCarbsIntent(intent)
++
+         setContent {
+             MainContent()
+         }
+     }
+ 
++    override fun onNewIntent(intent: Intent) {
++        super.onNewIntent(intent)
++        setIntent(intent)
++        consumeExternalCarbsIntent(intent)
++    }
++
++    private fun consumeExternalCarbsIntent(intent: Intent?) {
++        intent ?: return
++        val carbs = intent.getIntExtra("external_carbs", 0)
++        if (carbs <= 0) return
++        val notes = intent.getStringExtra("external_notes")
++        // Strip extras so a configuration change does not re-trigger the navigation
++        intent.removeExtra("external_carbs")
++        intent.removeExtra("external_notes")
++        intent.removeExtra("external_source")
++        pendingCarbsIntent.value = carbs to notes
++    }
++
+     @Composable
+     private fun MainContent() {
+         val navController = rememberNavController().also { this.navController = it }
+@@ -429,6 +452,14 @@ class ComposeMainActivity : AppCompatActivity() {
+         // Trigger initial refresh when app content first appears (after init completes)
+         LaunchedEffect(Unit) { refreshOnResume() }
+ 
++        // CarbCam: route pending external carbs intent to the Bolus Wizard
++        LaunchedEffect(pendingCarbsIntent.value) {
++            pendingCarbsIntent.value?.let { (carbs, notes) ->
++                navController.navigate(AppRoute.WizardDialog.createRoute(carbs = carbs, notes = notes))
++                pendingCarbsIntent.value = null
++            }
++        }
++
+         // Track last navigated route as a Crashlytics custom key for crash reports
+         DisposableEffect(navController) {
+             val listener = NavController.OnDestinationChangedListener { _, dest, _ ->
+diff --git a/app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt b/app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt
+new file mode 100644
+index 0000000000..e206587bcd
+--- /dev/null
++++ b/app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt
+@@ -0,0 +1,67 @@
++package app.aaps.activities
++
++import android.content.Intent
++import android.os.Bundle
++import androidx.activity.ComponentActivity
++import app.aaps.ComposeMainActivity
++import dagger.hilt.android.AndroidEntryPoint
++
++/**
++ * Exported launcher activity that lets 10BE CarbCam prefill the AAPS Bolus Wizard.
++ *
++ * Receives an Intent with action `info.nightscout.androidaps.action.OPEN_BOLUS_WIZARD`
++ * and extras `carbs` (Int, 1..80), optional `notes` (String) and `source` (String).
++ *
++ * - Caller is verified against a hard-coded whitelist (de.be10.carbcam).
++ * - Carbs are bounds-checked to 1..80 g; out-of-range values are silently rejected.
++ *   Larger meals can be adjusted manually in the wizard afterwards.
++ * - On success, forwards to ComposeMainActivity with internal extras
++ *   `external_carbs` / `external_notes`, which the activity then routes to
++ *   AppRoute.WizardDialog with NavController.
++ *
++ * No insulin is ever delivered without the standard wizard confirmation flow.
++ */
++@AndroidEntryPoint
++class WizardLaunchActivity : ComponentActivity() {
++
++    companion object {
++        const val EXTRA_CARBS = "carbs"
++        const val EXTRA_NOTES = "notes"
++        const val EXTRA_SOURCE = "source"
++
++        // Whitelist: only CarbCam may open the wizard externally
++        private val ALLOWED_CALLERS = setOf(
++            "de.be10.carbcam",
++            "de.be10.carbcam.debug"
++        )
++    }
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++
++        val caller = callingPackage ?: referrer?.host
++        if (caller !in ALLOWED_CALLERS) {
++            finish()
++            return
++        }
++
++        val carbs = intent.getIntExtra(EXTRA_CARBS, 0)
++        val notes = intent.getStringExtra(EXTRA_NOTES) ?: ""
++        val source = intent.getStringExtra(EXTRA_SOURCE) ?: ""
++
++        if (carbs <= 0 || carbs > 80) {
++            finish()
++            return
++        }
++
++        startActivity(
++            Intent(this, ComposeMainActivity::class.java).apply {
++                addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
++                putExtra("external_carbs", carbs)
++                putExtra("external_notes", notes)
++                putExtra("external_source", source)
++            }
++        )
++        finish()
++    }
++}
+\ No newline at end of file
+-- 
+2.51.1.windows.1
+
