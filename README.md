@@ -12,4 +12,4 @@ https://github.com/zehnBE/aaps3.4.2.2-carbcam-patches/blob/main/0001-iaps-carbca
 
 #
 # AAPS 4 (DEV) Stand 7734facd Milos Kozak <m.kozak@sysop.cz> on 01.06.2026 at 23:02
-https://github.com/zehnBE/aaps3.4.2.2-carbcam-patches/blob/main/0001-aaps-v4-carbcam-integration
+https://github.com/zehnBE/aaps3.4.2.2-carbcam-patches/blob/main/0001-aaps-v4-carbcam-integration.patch
