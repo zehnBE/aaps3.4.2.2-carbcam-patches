@@ -1,0 +1,218 @@
+From 9a8f7c3b2e1d4f5a6b8c9d0e1f2a3b4c5d6e7f80 Mon Sep 17 00:00:00 2001
+From: 10BE Software UG <support@ns.10be.de>
+Date: Mon, 1 Jun 2026 14:00:00 +0200
+Subject: [PATCH] Allow 10BE CarbCam to open the Bolus Wizard with prefilled
+ carbs
+
+Adds a whitelisted external entry point that lets 10BE CarbCam
+(package de.be10.carbcam) open the standard AAPS Bolus Wizard with
+the carbs field prefilled.
+
+Design notes:
+
+  * Caller package is verified against a hard-coded whitelist in
+    WizardLaunchActivity. Any other caller is silently rejected.
+  * Carbs are bounds-checked to 1..80 g; out-of-range values are
+    silently rejected. Larger meals can be adjusted manually in the
+    wizard afterwards.
+  * The launcher activity only forwards the value to MainActivity,
+    which then opens the unmodified WizardDialog with the carbs
+    field prefilled. All AAPS confirmation dialogs, safety checks and
+    bolus logic remain unchanged.
+  * No insulin is ever delivered without the standard confirmation
+    flow.
+
+Intent contract:
+
+  action  : info.nightscout.androidaps.action.OPEN_BOLUS_WIZARD
+  extras  : carbs  (int,    required, 1..80, grams)
+            notes  (string, optional)
+            source (string, optional, free-form caller tag)
+
+Target branch: AAPS master 3.4.2.2
+---
+ app/src/main/AndroidManifest.xml                                |  16 ++++++++++++++++
+ app/src/main/kotlin/app/aaps/MainActivity.kt                    |  28 ++++++++++++++++++++++++++++
+ app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt |  54 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ app/src/main/kotlin/app/aaps/di/ActivitiesModule.kt             |   2 ++
+ ui/src/main/kotlin/app/aaps/ui/dialogs/WizardDialog.kt          |   9 ++++++---
+ 5 files changed, 106 insertions(+), 3 deletions(-)
+ create mode 100644 app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index f69fc78c97..74998150f4 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -72,6 +72,22 @@
+             android:name="app.aaps.activities.HistoryBrowseActivity"
+             android:exported="false"
+             android:theme="@style/AppTheme" />
++
++        <!-- External entry point for opening the Bolus Wizard with prefilled carbs.
++             Caller package is verified against an in-app whitelist.
++             No insulin is ever delivered without the standard confirmation dialog. -->
++        <activity
++            android:name="app.aaps.activities.WizardLaunchActivity"
++            android:exported="true"
++            android:excludeFromRecents="true"
++            android:launchMode="singleInstance"
++            android:theme="@style/AppTheme.NoActionBar">
++            <intent-filter>
++                <action android:name="info.nightscout.androidaps.action.OPEN_BOLUS_WIZARD" />
++                   <category android:name="android.intent.category.DEFAULT" />
++            </intent-filter>
++        </activity>
++
+         <!-- Receive new BG readings from other local apps -->
+         <receiver
+             android:name="app.aaps.receivers.DataReceiver"
+diff --git a/app/src/main/kotlin/app/aaps/MainActivity.kt b/app/src/main/kotlin/app/aaps/MainActivity.kt
+index 2b57df07ea..5ac18ca313 100644
+--- a/app/src/main/kotlin/app/aaps/MainActivity.kt
++++ b/app/src/main/kotlin/app/aaps/MainActivity.kt
+@@ -262,12 +262,40 @@ class MainActivity : DaggerAppCompatActivityWithResult() {
+                         actionBarDrawerToggle.onOptionsItemSelected(menuItem)
+                 }
+         }
++        handleExternalWizardIntent(intent)
+         mainMenuProvider?.let { addMenuProvider(it) }
+         // Setup views on 2nd and next activity start
+         // On 1st start app is still initializing, start() is delayed and run from EventAppInitialized
+         if (config.appInitialized) setupViews()
+     }
+ 
++    override fun onNewIntent(intent: Intent) {
++          super.onNewIntent(intent)
++          setIntent(intent)
++          handleExternalWizardIntent(intent)
++    }
++
++    /**
++     * Picks up the carbs/notes extras forwarded from WizardLaunchActivity
++     * and opens the standard Bolus Wizard with the carbs field prefilled.
++     * The user still has to confirm the bolus through the regular
++     * AAPS confirmation dialog.
++     */
++    private fun handleExternalWizardIntent(intent: Intent) {
++            val carbs = intent.getIntExtra("open_wizard_carbs", 0)
++            if (carbs <= 0) return
++            val notes = intent.getStringExtra("open_wizard_notes") ?: ""
++            intent.removeExtra("open_wizard_carbs")
++            intent.removeExtra("open_wizard_notes")
++
++        app.aaps.ui.dialogs.WizardDialog().apply {
++             arguments = Bundle().apply {
++                putDouble("carbs_input", carbs.toDouble())
++                putString("notes_input", notes)
++            }
++        }.show(supportFragmentManager, "WizardDialog")
++    }
++
+     private fun start() {
+         binding.splash.visibility = View.GONE
+         setUserStats()
+diff --git a/app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt b/app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt
+new file mode 100644
+index 0000000000..93074a3463
+--- /dev/null
++++ b/app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt
+@@ -0,0 +1,54 @@
++package app.aaps.activities
++
++import android.content.Intent
++import android.os.Bundle
++import app.aaps.MainActivity
++import app.aaps.plugins.configuration.activities.DaggerAppCompatActivityWithResult
++
++/**
++ * Entry point for external apps that want to open the Bolus Wizard
++ * with pre-filled carbs. Forwards to MainActivity which then shows
++ * the WizardDialog. The user must confirm the bolus through the
++ * standard AAPS confirmation flow.
++ *
++ * Intent contract:
++ *   action: info.nightscout.androidaps.action.OPEN_BOLUS_WIZARD
++ *   extras:
++ *     carbs  (int,    required, 1..80, grams)
++ *     notes  (string, optional)
++ *     source (string, optional, free-form caller tag)
++ */
++class WizardLaunchActivity : DaggerAppCompatActivityWithResult() {
++
++    companion object {
++        const val EXTRA_CARBS    = "carbs"
++        const val EXTRA_NOTES    = "notes"
++        const val EXTRA_SOURCE   = "source"
++        const val INTERNAL_CARBS = "open_wizard_carbs"
++        const val INTERNAL_NOTES = "open_wizard_notes"
++
++        // TODO: move to Inter-app settings preference in a follow-up PR
++        private val ALLOWED_CALLERS = setOf(
++            "de.be10.carbcam"
++            // additional packages can be added here or via Preferences later
++        )
++    }
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++
++        val caller = callingPackage ?: referrer?.host
++        if (caller !in ALLOWED_CALLERS) { finish(); return }
++
++        val carbs = intent.getIntExtra(EXTRA_CARBS, 0)
++        val notes = intent.getStringExtra(EXTRA_NOTES) ?: ""
++        if (carbs <= 0 || carbs > 80) { finish(); return }
++
++        startActivity(Intent(this, MainActivity::class.java).apply {
++            addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
++            putExtra(INTERNAL_CARBS, carbs)
++            putExtra(INTERNAL_NOTES, notes)
++        })
++        finish()
++    }
++}
+\ No newline at end of file
+diff --git a/app/src/main/kotlin/app/aaps/di/ActivitiesModule.kt b/app/src/main/kotlin/app/aaps/di/ActivitiesModule.kt
+index 800d396aec..224a330391 100644
+--- a/app/src/main/kotlin/app/aaps/di/ActivitiesModule.kt
++++ b/app/src/main/kotlin/app/aaps/di/ActivitiesModule.kt
+@@ -4,6 +4,7 @@ import app.aaps.MainActivity
+ import app.aaps.activities.HistoryBrowseActivity
+ import app.aaps.activities.MyPreferenceFragment
+ import app.aaps.activities.PreferencesActivity
++import app.aaps.activities.WizardLaunchActivity
+ import dagger.Module
+ import dagger.android.ContributesAndroidInjector
+ 
+@@ -13,6 +14,7 @@ abstract class ActivitiesModule {
+ 
+     @ContributesAndroidInjector abstract fun contributesHistoryBrowseActivity(): HistoryBrowseActivity
+     @ContributesAndroidInjector abstract fun contributesMainActivity(): MainActivity
++    @ContributesAndroidInjector abstract fun contributesWizardLaunchActivity(): WizardLaunchActivity
+     @ContributesAndroidInjector abstract fun contributesPreferencesActivity(): PreferencesActivity
+     @ContributesAndroidInjector abstract fun contributesPreferencesFragment(): MyPreferenceFragment
+ }
+\ No newline at end of file
+diff --git a/ui/src/main/kotlin/app/aaps/ui/dialogs/WizardDialog.kt b/ui/src/main/kotlin/app/aaps/ui/dialogs/WizardDialog.kt
+index 51682085fc..6bd984ac0e 100644
+--- a/ui/src/main/kotlin/app/aaps/ui/dialogs/WizardDialog.kt
++++ b/ui/src/main/kotlin/app/aaps/ui/dialogs/WizardDialog.kt
+@@ -170,9 +170,12 @@ class WizardDialog : DaggerDialogFragment() {
+                     ?: 0.0, 0.0, 30.0, 0.1, DecimalFormat("0.0"), false, binding.okcancel.ok, textWatcher
+             )
+         }
+-        binding.carbsInput.setParams(
+-            savedInstanceState?.getDouble("carbs_input")
+-                ?: 0.0, 0.0, maxCarbs.toDouble(), 1.0, DecimalFormat("0"), false, binding.okcancel.ok, textWatcher
++        val initialCarbs = savedInstanceState?.getDouble("carbs_input")
++             ?: arguments?.getDouble("carbs_input", 0.0)?.takeIf { it > 0.0 }
++             ?: 0.0
++             binding.carbsInput.setParams(
++                initialCarbs, 0.0, maxCarbs.toDouble(), 1.0, DecimalFormat("0"),
++                false, binding.okcancel.ok, textWatcher
+         )
+ 
+         // If there is no BG using % lower that 100% leads to high BGs
+
+-- 
+2.43.0
