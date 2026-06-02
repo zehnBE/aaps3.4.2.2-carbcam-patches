@@ -1,0 +1,223 @@
+From 60741745f6f70a2add683702f6471aaaf7172a5d Mon Sep 17 00:00:00 2001
+From: 10BE Software UG <support@ns.10be.de>
+Date: Tue, 2 Jun 2026 11:07:09 +0200
+Subject: [PATCH] Allow 10BE CarbCam to prefill the AddCarbs sheet
+
+Adds a small URL-scheme entry point that lets 10BE CarbCam
+(package de.be10.carbcam) hand its carb estimate over to Trio.
+On URL receipt the AddCarbs sheet opens prefilled with the
+supplied carb / fat / protein / notes values; the user must
+still confirm via the standard Save and continue button before
+anything is written to CoreData.
+
+Design notes:
+
+  * URL scheme: carbcam-trio://
+  * URL format: carbcam-trio://carbs?value=N&fat=N&protein=N
+                                    &notes=...&source=...
+  * Validation: value 1..80 g (required), fat 0..80 g (optional),
+    protein 0..80 g (optional), notes max 200 chars. Out-of-range
+    values are silently rejected.
+  * No caller identity check is performed: anyone can open the
+    URL, but the user always confirms in the AddCarbs sheet
+    before logging.
+  * No silent CoreData writes, no silent bolusing. All existing
+    confirmation flows are unchanged.
+  * fat and protein are passed as separate URL parameters so
+    Trio's existing UI fields can be prefilled directly without
+    FPE-style 50/50 splitting heuristics.
+
+Implementation:
+
+  * TrioApp.handleURL gains a `carbs` host case and a small
+    handleCarbCamURL helper.
+  * A new ExternalCarbsPrefill enum acts as a one-shot prefill
+    carrier (store / consume / hasValue). consume() clears the
+    value as it returns, so a later manual re-open of AddCarbs
+    does not re-apply the same prefill.
+  * Home.StateModel listens for the .openAddCarbsFromCarbCam
+    notification via Combine, toggling a new
+    shouldDisplayCarbCamSheet @Observable property.
+  * HomeRootView.body binds a new .sheet on the top-level ZStack
+    (not on mainView) so the sheet appears regardless of which
+    tab is active when the URL arrives.
+  * Cold-start safe: ExternalCarbsPrefill.hasValue is checked at
+    the end of HomeStateModel.subscribe(), so a URL that arrived
+    before the listener was wired up still triggers the sheet on
+    the next main-thread tick.
+  * AddCarbsStateModel.subscribe() consumes the prefill at the
+    end of its existing initialization, clamping each value
+    against the corresponding max setting.
+
+Target branch: Artificial-Pancreas/Trio main
+---
+ Trio/Resources/Info.plist                     |  1 +
+ Trio/Sources/Application/TrioApp.swift        | 56 +++++++++++++++++++
+ .../Modules/AddCarbs/AddCarbsStateModel.swift | 10 ++++
+ .../Sources/Modules/Home/HomeStateModel.swift | 16 ++++++
+ .../Modules/Home/View/HomeRootView.swift      |  5 ++
+ 5 files changed, 88 insertions(+)
+
+diff --git a/Trio/Resources/Info.plist b/Trio/Resources/Info.plist
+index 7bb1d9818..60a0a38a2 100644
+--- a/Trio/Resources/Info.plist
++++ b/Trio/Resources/Info.plist
+@@ -38,6 +38,7 @@
+ 			<key>CFBundleURLSchemes</key>
+ 			<array>
+ 				<string>$(APP_URL_SCHEME)</string>
++				<string>carbcam-trio</string>
+ 			</array>
+ 		</dict>
+ 	</array>
+diff --git a/Trio/Sources/Application/TrioApp.swift b/Trio/Sources/Application/TrioApp.swift
+index b4d973bf5..8cf52fe3e 100644
+--- a/Trio/Sources/Application/TrioApp.swift
++++ b/Trio/Sources/Application/TrioApp.swift
+@@ -8,6 +8,7 @@ extension Notification.Name {
+     static let initializationCompleted = Notification.Name("initializationCompleted")
+     static let initializationError = Notification.Name("initializationError")
+     static let onboardingCompleted = Notification.Name("onboardingCompleted")
++    static let openAddCarbsFromCarbCam = Notification.Name("openAddCarbsFromCarbCam")
+ }
+ 
+ @main struct TrioApp: App {
+@@ -492,9 +493,64 @@ extension Notification.Name {
+         switch components?.host {
+         case "device-select-resp":
+             resolver.resolve(NotificationCenter.self)!.post(name: .openFromGarminConnect, object: url)
++        case "carbs":
++            handleCarbCamURL(components: components)
+         default: break
+         }
+     }
++
++    /// Handles `carbcam-trio://carbs?value=N&fat=N&protein=N&notes=...&source=...`
++    /// from 10BE CarbCam. Validates ranges (1..80 g each) and posts a notification
++    /// that the Home StateModel picks up to open the AddCarbs sheet prefilled.
++    /// The user always confirms via Save in the sheet - no silent logging.
++    private func handleCarbCamURL(components: URLComponents?) {
++        guard let items = components?.queryItems else { return }
++        guard let valueStr = items.first(where: { $0.name == "value" })?.value,
++              let value = Int(valueStr), value >= 1, value <= 80
++        else { return }
++
++        let fat: Int = {
++            guard let s = items.first(where: { $0.name == "fat" })?.value,
++                  let v = Int(s), v >= 0, v <= 80 else { return 0 }
++            return v
++        }()
++        let protein: Int = {
++            guard let s = items.first(where: { $0.name == "protein" })?.value,
++                  let v = Int(s), v >= 0, v <= 80 else { return 0 }
++            return v
++        }()
++        let notes = (items.first(where: { $0.name == "notes" })?.value ?? "")
++            .prefix(200)
++            .description
++
++        ExternalCarbsPrefill.store(
++            carbs: Decimal(value),
++            fat: Decimal(fat),
++            protein: Decimal(protein),
++            notes: notes
++        )
++
++        Foundation.NotificationCenter.default.post(name: .openAddCarbsFromCarbCam, object: nil)
++    }
++}
++
++/// One-shot prefill carrier for external carb intents (currently 10BE CarbCam).
++/// The producer (TrioApp.handleCarbCamURL) calls `store(...)`; the consumer
++/// (AddCarbsStateModel.subscribe) calls `consume()` which returns and clears
++/// the value in one step. The Home StateModel uses `hasValue` on cold start.
++enum ExternalCarbsPrefill {
++    private static var pending: (carbs: Decimal, fat: Decimal, protein: Decimal, notes: String)?
++
++    static func store(carbs: Decimal, fat: Decimal, protein: Decimal, notes: String) {
++        pending = (carbs, fat, protein, notes)
++    }
++
++    static func consume() -> (carbs: Decimal, fat: Decimal, protein: Decimal, notes: String)? {
++        defer { pending = nil }
++        return pending
++    }
++
++    static var hasValue: Bool { pending != nil }
+ }
+ 
+ public extension Bundle {
+diff --git a/Trio/Sources/Modules/AddCarbs/AddCarbsStateModel.swift b/Trio/Sources/Modules/AddCarbs/AddCarbsStateModel.swift
+index 9ee0bf9f3..556d2b681 100644
+--- a/Trio/Sources/Modules/AddCarbs/AddCarbsStateModel.swift
++++ b/Trio/Sources/Modules/AddCarbs/AddCarbsStateModel.swift
+@@ -29,6 +29,16 @@ extension AddCarbs {
+             maxCarbs = settings.settings.maxCarbs
+             maxFat = settings.settings.maxFat
+             maxProtein = settings.settings.maxProtein
++
++            // CarbCam: consume any pending external carbs prefill (from carbcam-trio:// URL).
++            // consume() returns the value and clears the singleton in one step,
++            // so a later re-open of AddCarbs does not re-apply the same prefill.
++            if let prefill = ExternalCarbsPrefill.consume() {
++                carbs = min(prefill.carbs, maxCarbs)
++                fat = min(prefill.fat, maxFat)
++                protein = min(prefill.protein, maxProtein)
++                note = prefill.notes
++            }
+         }
+ 
+         func add() {
+diff --git a/Trio/Sources/Modules/Home/HomeStateModel.swift b/Trio/Sources/Modules/Home/HomeStateModel.swift
+index d0d2d78b9..d2de91965 100644
+--- a/Trio/Sources/Modules/Home/HomeStateModel.swift
++++ b/Trio/Sources/Modules/Home/HomeStateModel.swift
+@@ -56,6 +56,7 @@ extension Home {
+         var percentage: Int = 100
+         var shouldDisplayPumpSetupSheet = false
+         var shouldDisplayCGMSetupSheet = false
++        var shouldDisplayCarbCamSheet = false
+         var errorMessage: String?
+         var errorDate: Date?
+         var bolusProgress: Decimal?
+@@ -163,6 +164,21 @@ extension Home {
+ 
+             // Parallelize Setup functions
+             setupHomeViewConcurrently()
++
++            // CarbCam: listen for external carb prefill requests (from URL scheme handler)
++            Foundation.NotificationCenter.default.publisher(for: .openAddCarbsFromCarbCam)
++                .receive(on: DispatchQueue.main)
++                .sink { [weak self] _ in
++                    self?.shouldDisplayCarbCamSheet = true
++                }
++                .store(in: &subscriptions)
++
++            // Cold start: URL arrived before subscribe() ran -> open the sheet now
++            if ExternalCarbsPrefill.hasValue {
++                DispatchQueue.main.async { [weak self] in
++                    self?.shouldDisplayCarbCamSheet = true
++                }
++            }
+         }
+ 
+         private func setupHomeViewConcurrently() {
+diff --git a/Trio/Sources/Modules/Home/View/HomeRootView.swift b/Trio/Sources/Modules/Home/View/HomeRootView.swift
+index f29639b7e..f8c836241 100644
+--- a/Trio/Sources/Modules/Home/View/HomeRootView.swift
++++ b/Trio/Sources/Modules/Home/View/HomeRootView.swift
+@@ -1134,6 +1134,11 @@ extension Home {
+                     CustomProgressView(text: String(localized: "Updating IOB...", comment: "Progress text when updating IOB"))
+                 }
+             }
++            // CarbCam: external carbs prefill sheet, triggered by carbcam-trio:// URL.
++            // Lives on body ZStack so it works regardless of which tab is active.
++            .sheet(isPresented: $state.shouldDisplayCarbCamSheet) {
++                AddCarbs.RootView(resolver: resolver)
++            }
+         }
+     }
+ }
+-- 
+2.51.1.windows.1
+
