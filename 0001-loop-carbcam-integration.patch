@@ -1,0 +1,139 @@
+From b6151bddf8fbf2286c213eadb0f52df3e3fb253a Mon Sep 17 00:00:00 2001
+From: 10BE Software UG <support@ns.10be.de>
+Date: Tue, 2 Jun 2026 13:41:17 +0200
+Subject: [PATCH] Allow 10BE CarbCam to open the Carb Entry view with
+ prefilled carbs
+
+Adds a small URL-scheme entry point that lets 10BE CarbCam
+(bundle de.be10.carbcam) hand its carb estimate over to Loop.
+On URL receipt the standard carb entry sheet opens with carbs
+and food type prefilled; the user must still tap Save before
+anything is logged, and Loop's existing bolus prompt flow runs
+afterwards unchanged.
+
+Design notes:
+
+  * URL scheme: carbcam-loop:// (registered in Info.plist next to
+    the existing $(URL_SCHEME_NAME) entry, so Loop's own deeplinks
+    keep working).
+  * URL format: carbcam-loop://carbs?value=N&notes=...&source=...
+  * Validation: value is required and clamped to 1..80 g, notes
+    are truncated to 200 chars. Out-of-range or missing values
+    cause the URL to be silently ignored.
+  * The handler reuses Loop's existing NSUserActivity-based carb
+    entry restoration path: it builds a NewCarbEntry, wraps it in
+    an NSUserActivity.forNewCarbEntry(), and feeds it through
+    rootViewController.restoreUserActivityState(_:) - the same
+    mechanism Siri's NewCarbEntryIntent and the missed-meal
+    notification already use. This means CarbEntryViewModel,
+    RootNavigationController, and StatusTableViewController need
+    zero changes.
+  * Loop's carb entry UI does not have fat or protein fields, so
+    if CarbCam sends those URL parameters they are intentionally
+    ignored on the Loop side (unlike iAPS / Trio where they map
+    1:1 to existing fields).
+  * No silent CarbStore writes, no silent bolusing. All existing
+    confirmation flows, validation, and bolus prompts remain
+    completely unchanged.
+
+Intent contract:
+
+  scheme : carbcam-loop
+  host   : carbs
+  query  : value  (int,    required, 1..80, grams)
+           notes  (string, optional, max 200 chars; used as Loop's
+                   foodType field on the carb entry sheet)
+           source (string, optional, free-form caller tag)
+           fat    (int,    optional, ignored by Loop)
+           protein(int,    optional, ignored by Loop)
+
+Target branch: LoopKit/Loop main
+---
+ Loop/Info.plist                     |  1 +
+ Loop/Managers/DeeplinkManager.swift | 44 +++++++++++++++++++++++++++++
+ 2 files changed, 45 insertions(+)
+
+diff --git a/Loop/Info.plist b/Loop/Info.plist
+index ddad5426..d5d2cd28 100644
+--- a/Loop/Info.plist
++++ b/Loop/Info.plist
+@@ -38,6 +38,7 @@
+ 			<key>CFBundleURLSchemes</key>
+ 			<array>
+ 				<string>$(URL_SCHEME_NAME)</string>
++				<string>carbcam-loop</string>
+ 			</array>
+ 		</dict>
+ 	</array>
+diff --git a/Loop/Managers/DeeplinkManager.swift b/Loop/Managers/DeeplinkManager.swift
+index 86b17f62..b5550ae3 100644
+--- a/Loop/Managers/DeeplinkManager.swift
++++ b/Loop/Managers/DeeplinkManager.swift
+@@ -7,6 +7,8 @@
+ //
+ 
+ import UIKit
++import LoopKit
++import HealthKit
+ 
+ enum Deeplink: String, CaseIterable {
+     case carbEntry = "carb-entry"
+@@ -32,6 +34,12 @@ class DeeplinkManager {
+     }
+     
+     func handle(_ url: URL) -> Bool {
++        // CarbCam URL scheme - dispatched separately from standard Loop deeplinks
++        // because the carbcam-loop:// scheme is registered for this exact purpose.
++        if url.scheme == "carbcam-loop" {
++            return handleCarbCamURL(url)
++        }
++
+         guard let rootViewController = rootViewController as? RootNavigationController, let deeplink = Deeplink(url: url) else {
+             return false
+         }
+@@ -40,6 +48,42 @@ class DeeplinkManager {
+         return true
+     }
+     
++    /// Handles `carbcam-loop://carbs?value=N&notes=...&source=...` from 10BE CarbCam.
++    /// Reuses Loop's existing NSUserActivity-based carb entry restoration path
++    /// (the same mechanism used by Siri's NewCarbEntryIntent and the missed-meal
++    /// notification), so all confirmation flows, validation, and bolus prompts
++    /// remain unchanged - the user still has to tap Save in the carb entry sheet
++    /// before anything is logged.
++    ///
++    /// Loop's carb entry UI only supports carbs + foodType + time + absorptionTime;
++    /// fat and protein parameters from the URL are intentionally ignored.
++    private func handleCarbCamURL(_ url: URL) -> Bool {
++        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
++              components.host == "carbs",
++              let items = components.queryItems,
++              let valueStr = items.first(where: { $0.name == "value" })?.value,
++              let value = Int(valueStr),
++              value >= 1, value <= 80
++        else { return false }
++
++        let notes = (items.first(where: { $0.name == "notes" })?.value ?? "")
++            .prefix(200)
++            .description
++
++        let entry = NewCarbEntry(
++            quantity: HKQuantity(unit: .gram(), doubleValue: Double(value)),
++            startDate: Date(),
++            foodType: notes.isEmpty ? nil : notes,
++            absorptionTime: nil
++        )
++
++        let activity = NSUserActivity.forNewCarbEntry()
++        activity.update(from: entry)
++
++        rootViewController?.restoreUserActivityState(activity)
++        return true
++    }
++
+     func handle(_ deeplink: Deeplink) -> Bool {
+         guard let rootViewController = rootViewController as? RootNavigationController else {
+             return false
+-- 
+2.51.1.windows.1
+
