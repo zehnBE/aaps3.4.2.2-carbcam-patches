@@ -181,7 +181,8 @@ index 0000000000..e206587bcd
 +        // Whitelist: only CarbCam may open the wizard externally
 +        private val ALLOWED_CALLERS = setOf(
 +            "de.be10.carbcam",
-+            "de.be10.carbcam.debug"
++            "de.be10.carbcam.debug",
++            "de.be10.carbcam-debug"
 +        )
 +    }
 +
