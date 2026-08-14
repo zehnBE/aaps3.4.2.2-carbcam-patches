@@ -148,7 +148,8 @@ index 0000000000..93074a3463
 +
 +        // TODO: move to Inter-app settings preference in a follow-up PR
 +        private val ALLOWED_CALLERS = setOf(
-+            "de.be10.carbcam"
++            "de.be10.carbcam",
++            "de.be10.carbcam.debug"
 +            // additional packages can be added here or via Preferences later
 +        )
 +    }
