@@ -14,8 +14,8 @@ Details/Anleitung/Blog: https://ns.10be.de/blog/2026/06/01/carbcam-kohlenhydrate
 | AAPS V4 (dev) | Android / Kotlin (Compose) | ✓ | – | – | – | ✓ | ✓ | Android Intent |
 | **iAPS main (8.3.4)** | iOS / Swift | ✓ | **✓** | **✓** | **✓** | ✓ | ✓ | `carbcam-iaps://` |
 | **iAPS dev** | iOS / Swift | ✓ | **✓** | **✓** | **✓** | ✓ | ✓ | `carbcam-iaps://` |
-| Trio | iOS / Swift | ✓ | ✓ | ✓ | – | ✓ | ✓ | `carbcam-trio://` |
-| Loop | iOS / Swift | ✓ | – | – | – | ✓ | ✓ | `carbcam-loop://` |
+| Trio 0.8.1 / 1.0.1 | iOS / Swift | ✓ | ✓ | ✓ | – | ✓ | ✓ | `carbcam-trio://` |
+| Loop 3.14.8 | iOS / Swift | ✓ | – | – | – | ✓ | ✓ | `carbcam-loop://` |
 
 Loop und AAPS haben in ihrer Carb-Entry-UI **keine** Fett/Eiweiß-Felder. Die Patches ignorieren die zusätzlichen URL-Parameter dort still. CarbCam kann die URL trotzdem einheitlich mit allen Feldern bauen – jede App nimmt nur was sie kennt.
 
@@ -57,11 +57,19 @@ Loop und AAPS haben in ihrer Carb-Entry-UI **keine** Fett/Eiweiß-Felder. Die Pa
 - Base: `Artificial-Pancreas/iAPS` dev HEAD `ac4e593cc`
 - URL: identisch zu main
 
-### Trio
+### Trio 0.8.1
 
-- File: `0001-trio-carbcam-integration.patch`
-- Base: `nightscout/Trio` main (Juni 2026 Stand)
+- File: `0001-trio-0.8.1-carbcam-integration.patch`
+- Base: `nightscout/Trio` tag `v0.8.1`
+- zehnBE-Branch: `main` (commit `60741745f`)
 - URL: `carbcam-trio://carbs?value=42&fat=12&protein=8&notes=Pizza&source=carbcam`
+
+### Trio 1.0.1 (aktuelle stable)
+
+- File: `0001-trio-1.0.1-carbcam-integration.patch`
+- Base: `nightscout/Trio` tag `v1.0.1`
+- zehnBE-Branch: `1.0.1-carbcam`
+- URL: identisch zu 0.8.1
 
 ### Loop 3.14.8 (mit iOS 27 SDK Fixes)
 
@@ -80,6 +88,7 @@ Die folgenden Patches sind gegen ältere Upstream-Bases erstellt und deshalb nic
 - `0001-aaps-v4-carbcam-integration.patch` — Juni 2026, Base `7734facd` (viel älter als aktueller dev)
 - `0001-iaps-carbcam-integration.patch` — Juni 2026, veraltet nach Upstream-Umbauten (Micronutrient-Refactor)
 - `0001-loop-carbcam-integration.patch` — Juni 2026, gegen Loop v3.14.0 (der Base mit iPhone Air Crash)
+- `0001-trio-carbcam-integration.patch` — Juni 2026, Base v0.8.1 (funktioniert weiterhin für 0.8.1, ansonsten ersetzt durch 1.0.1-Variante)
 
 Für neue Installationen: die aktuellen Patchfiles oben verwenden.
 
@@ -123,7 +132,8 @@ Für alle Patches identisch angelegt:
 - **AAPS V4 (dev)**: neu gebaut gegen aktuellen dev HEAD (10.266 Commits nach dem alten Juni-Stand), Compose Multiplatform Migration berücksichtigt
 - **iAPS main + dev**: neu gebaut nach Upstream-Umbauten (67 dev-Commits, 12 main-Commits), Micronutrient-Refactor integriert, jetzt zusätzlich mit **Fett/Eiweiß/Ballaststoffe** Support
 - **Loop**: neu gebaut auf v3.14.8 Base (LoopKit dev), enthält alle iOS 27 SDK Fixes + Xcode 27 Fixes — behebt gleichzeitig den iPhone Air / iOS 26.5.1 App-Start-Crash aus Juni-Builds
-- **Trio**: unverändert
+- **Trio 0.8.1**: unverändert, sauberer Patchfile-Name
+- **Trio 1.0.1**: neu — neueste stable, 1.608 Commits nach 0.8.1
 
 ---
 
