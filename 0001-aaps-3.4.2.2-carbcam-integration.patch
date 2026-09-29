@@ -1,15 +1,15 @@
-From d2bb6824313e0644433281536cc8fffd61f78f82 Mon Sep 17 00:00:00 2001
+From 6d4f8091f8e02c90caf7b956c01cdf48c6518371 Mon Sep 17 00:00:00 2001
 From: 10BE Software UG <support@ns.10be.de>
 Date: Tue, 29 Sep 2026 15:18:53 +0200
 Subject: [PATCH] Allow 10BE CarbCam to prefill the AAPS Bolus Wizard (3.4.2.2)
 
 ---
  app/src/main/AndroidManifest.xml              | 12 +++++
- app/src/main/kotlin/app/aaps/MainActivity.kt  | 26 ++++++++++
+ app/src/main/kotlin/app/aaps/MainActivity.kt  | 27 +++++++++++
  .../aaps/activities/WizardLaunchActivity.kt   | 47 +++++++++++++++++++
  .../kotlin/app/aaps/di/ActivitiesModule.kt    |  2 +
  .../app/aaps/ui/dialogs/WizardDialog.kt       |  8 ++--
- 5 files changed, 92 insertions(+), 3 deletions(-)
+ 5 files changed, 93 insertions(+), 3 deletions(-)
  create mode 100644 app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt
 
 diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
@@ -36,7 +36,7 @@ index f69fc78c97..fee334b937 100644
  
  </manifest>
 diff --git a/app/src/main/kotlin/app/aaps/MainActivity.kt b/app/src/main/kotlin/app/aaps/MainActivity.kt
-index 2b57df07ea..7f9ed424ef 100644
+index 2b57df07ea..10acb039c9 100644
 --- a/app/src/main/kotlin/app/aaps/MainActivity.kt
 +++ b/app/src/main/kotlin/app/aaps/MainActivity.kt
 @@ -266,6 +266,8 @@ class MainActivity : DaggerAppCompatActivityWithResult() {
@@ -48,7 +48,7 @@ index 2b57df07ea..7f9ed424ef 100644
      }
  
      private fun start() {
-@@ -539,4 +541,28 @@ class MainActivity : DaggerAppCompatActivityWithResult() {
+@@ -539,4 +541,29 @@ class MainActivity : DaggerAppCompatActivityWithResult() {
          }
      }
  
@@ -60,7 +60,8 @@ index 2b57df07ea..7f9ed424ef 100644
 +    }
 +
 +    private fun handleExternalWizardIntent(intent: Intent?) {
-+        val carbs = intent?.getIntExtra("open_wizard_carbs", 0) ?: 0
++        intent ?: return
++        val carbs = intent.getIntExtra("open_wizard_carbs", 0)
 +        if (carbs <= 0) return
 +
 +        val notes = intent.getStringExtra("open_wizard_notes") ?: ""
