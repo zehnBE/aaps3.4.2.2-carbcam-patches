@@ -1,0 +1,154 @@
+From 337bbb49713ce5988c544a807dae86c74b40b528 Mon Sep 17 00:00:00 2001
+From: 10BE Software UG <support@ns.10be.de>
+Date: Tue, 29 Sep 2026 13:56:27 +0200
+Subject: [PATCH] Allow 10BE CarbCam to prefill the AddCarbs sheet
+ (fat/protein/fiber)
+
+---
+ FreeAPS/Resources/Info.plist                  |  1 +
+ FreeAPS/Sources/Application/FreeAPSApp.swift  | 56 +++++++++++++++++++
+ .../Modules/AddCarbs/AddCarbsStateModel.swift | 12 ++++
+ .../Sources/Modules/Home/HomeStateModel.swift | 18 ++++++
+ 4 files changed, 87 insertions(+)
+
+diff --git a/FreeAPS/Resources/Info.plist b/FreeAPS/Resources/Info.plist
+index 451b96e64..0a6c9b426 100644
+--- a/FreeAPS/Resources/Info.plist
++++ b/FreeAPS/Resources/Info.plist
+@@ -39,6 +39,7 @@
+ 			<array>
+ 				<string>$(APP_URL_SCHEME)</string>
+ 				<string>freeaps-x</string>
++				<string>carbcam-iaps</string>
+ 			</array>
+ 		</dict>
+ 	</array>
+diff --git a/FreeAPS/Sources/Application/FreeAPSApp.swift b/FreeAPS/Sources/Application/FreeAPSApp.swift
+index 904667732..3bb74fcfc 100644
+--- a/FreeAPS/Sources/Application/FreeAPSApp.swift
++++ b/FreeAPS/Sources/Application/FreeAPSApp.swift
+@@ -157,9 +157,43 @@ private struct LaunchedAppView: View {
+         switch components?.host {
+         case "device-select-resp":
+             FreeAPSApp.resolver.resolve(NotificationCenter.self)!.post(name: .openFromGarminConnect, object: url)
++        case "carbs":
++            handleCarbCamURL(components: components)
+         default: break
+         }
+     }
++
++    /// Handles `carbcam-iaps://carbs?value=N&fat=X&protein=Y&fiber=Z&notes=...&source=...`
++    /// URLs from 10BE CarbCam. Stores the prefill in ExternalCarbsPrefill and posts
++    /// openAddCarbsFromCarbCam. HomeStateModel listens and opens AddCarbs which
++    /// consumes the prefill. User always confirms via Save.
++    private func handleCarbCamURL(components: URLComponents?) {
++        guard let items = components?.queryItems else { return }
++        guard let valueStr = items.first(where: { $0.name == "value" })?.value,
++              let value = Int(valueStr), value >= 1, value <= 80
++        else { return }
++
++        let notes = (items.first(where: { $0.name == "notes" })?.value ?? "")
++            .prefix(200).description
++        let source = (items.first(where: { $0.name == "source" })?.value ?? "")
++            .prefix(50).description
++
++        func parseOptional(_ name: String) -> Decimal {
++            guard let s = items.first(where: { $0.name == name })?.value,
++                  let v = Int(s), v >= 0, v <= 80 else { return 0 }
++            return Decimal(v)
++        }
++
++        ExternalCarbsPrefill.carbs = Decimal(value)
++        ExternalCarbsPrefill.fat = parseOptional("fat")
++        ExternalCarbsPrefill.protein = parseOptional("protein")
++        ExternalCarbsPrefill.fiber = parseOptional("fiber")
++        ExternalCarbsPrefill.notes = notes
++        ExternalCarbsPrefill.source = source
++
++        Foundation.NotificationCenter.default
++            .post(name: Notification.Name.openAddCarbsFromCarbCam, object: nil)
++    }
+ }
+ 
+ private struct WaitingForUnlockView: View {
+@@ -214,3 +248,25 @@ enum ProtectedDataGate {
+         return (try? Data(contentsOf: probeURL)) != nil
+     }
+ }
++
++// MARK: - CarbCam URL prefill support (fat/protein/fiber included)
++
++enum ExternalCarbsPrefill {
++    static var carbs: Decimal?
++    static var fat: Decimal?
++    static var protein: Decimal?
++    static var fiber: Decimal?
++    static var notes: String?
++    static var source: String?
++
++    static func consume() -> (carbs: Decimal, fat: Decimal, protein: Decimal, fiber: Decimal, notes: String, source: String)? {
++        guard let c = carbs else { return nil }
++        let result = (c, fat ?? 0, protein ?? 0, fiber ?? 0, notes ?? "", source ?? "")
++        carbs = nil; fat = nil; protein = nil; fiber = nil; notes = nil; source = nil
++        return result
++    }
++}
++
++extension Notification.Name {
++    static let openAddCarbsFromCarbCam = Notification.Name("openAddCarbsFromCarbCam")
++}
+diff --git a/FreeAPS/Sources/Modules/AddCarbs/AddCarbsStateModel.swift b/FreeAPS/Sources/Modules/AddCarbs/AddCarbsStateModel.swift
+index 3f5753ec2..d03148f5a 100644
+--- a/FreeAPS/Sources/Modules/AddCarbs/AddCarbsStateModel.swift
++++ b/FreeAPS/Sources/Modules/AddCarbs/AddCarbsStateModel.swift
+@@ -46,6 +46,18 @@ extension AddCarbs {
+             useFPUconversion = settingsManager.settings.useFPUconversion
+             ai = settingsManager.settings.ai
+             mealViewMicronutrients = settingsManager.settings.mealViewMicronutrients
++
++            // CarbCam: consume pending prefill from FreeAPSApp.handleCarbCamURL.
++            // consume() returns the value and clears the static holder in one step,
++            // so manual re-open of AddCarbs does not re-apply the prefill.
++            if let prefill = ExternalCarbsPrefill.consume() {
++                carbs = prefill.carbs
++                fat = prefill.fat
++                protein = prefill.protein
++                fiber = prefill.fiber
++                if !prefill.notes.isEmpty { note = prefill.notes }
++                debug(.default, "CarbCam prefill consumed: \(prefill.carbs)g C / \(prefill.fat)g F / \(prefill.protein)g P / \(prefill.fiber)g Fib, source=\(prefill.source)")
++            }
+         }
+ 
+         func add(_ continue_: Bool, fetch: Bool) {
+diff --git a/FreeAPS/Sources/Modules/Home/HomeStateModel.swift b/FreeAPS/Sources/Modules/Home/HomeStateModel.swift
+index 9d5203aaf..efc0ada94 100644
+--- a/FreeAPS/Sources/Modules/Home/HomeStateModel.swift
++++ b/FreeAPS/Sources/Modules/Home/HomeStateModel.swift
+@@ -353,6 +353,24 @@ extension Home {
+                     }
+                 }
+                 .store(in: &lifetime)
++
++            // CarbCam: open AddCarbs sheet when external URL was received.
++            // Foundation. prefix because iAPS has its own NotificationCenter protocol
++            // that would otherwise shadow Foundation.NotificationCenter.
++            Foundation.NotificationCenter.default
++                .publisher(for: Notification.Name.openAddCarbsFromCarbCam)
++                .receive(on: DispatchQueue.main)
++                .sink { [weak self] _ in
++                    self?.addCarbs()
++                }
++                .store(in: &lifetime)
++
++            // Cold-start safe: URL arrived before this listener was wired up
++            if ExternalCarbsPrefill.carbs != nil {
++                DispatchQueue.main.async { [weak self] in
++                    self?.addCarbs()
++                }
++            }
+         }
+ 
+         private func updateSensorDays() {
+-- 
+2.54.0 (Apple Git-157)
+
