@@ -1,0 +1,159 @@
+From 463875e18e15be4627037dd7753729d914f7fc56 Mon Sep 17 00:00:00 2001
+From: 10BE Software UG <support@ns.10be.de>
+Date: Tue, 29 Sep 2026 15:26:56 +0200
+Subject: [PATCH] Allow 10BE CarbCam to prefill the AAPS V4 Bolus Wizard (dev)
+
+---
+ app/src/main/AndroidManifest.xml              | 12 +++++
+ .../kotlin/app/aaps/ComposeMainActivity.kt    | 31 +++++++++++
+ .../aaps/activities/WizardLaunchActivity.kt   | 53 +++++++++++++++++++
+ 3 files changed, 96 insertions(+)
+ create mode 100644 app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index da65b6972a..870238afce 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -179,6 +179,18 @@
+                 tools:node="remove" />
+         </provider>
+ 
++            <activity
++            android:name="app.aaps.activities.WizardLaunchActivity"
++            android:exported="true"
++            android:excludeFromRecents="true"
++            android:launchMode="singleInstance"
++            android:theme="@style/AppTheme.NoActionBar">
++            <intent-filter>
++                <action android:name="info.nightscout.androidaps.action.OPEN_BOLUS_WIZARD" />
++                <category android:name="android.intent.category.DEFAULT" />
++            </intent-filter>
++        </activity>
++
+     </application>
+ 
+ </manifest>
+diff --git a/app/src/main/kotlin/app/aaps/ComposeMainActivity.kt b/app/src/main/kotlin/app/aaps/ComposeMainActivity.kt
+index a8f76c29f0..531a27b789 100644
+--- a/app/src/main/kotlin/app/aaps/ComposeMainActivity.kt
++++ b/app/src/main/kotlin/app/aaps/ComposeMainActivity.kt
+@@ -228,6 +228,9 @@ class ComposeMainActivity : MetroAppCompatActivity() {
+     }
+     private var navController: NavHostController? = null
+     private val _autoShowNotifications = mutableStateOf(false)
++
++    // CarbCam: pending carbs from external Intent (via WizardLaunchActivity), consumed by AppContent
++    private val pendingCarbsIntent = mutableStateOf<Pair<Int, String?>?>(null)
+     private val disposable = CompositeDisposable()
+ 
+     override fun onCreate(savedInstanceState: Bundle?) {
+@@ -276,6 +279,8 @@ class ComposeMainActivity : MetroAppCompatActivity() {
+ 
+         observePreferences()
+ 
++        consumeExternalCarbsIntent(intent)
++
+         setContent {
+             MainContent()
+         }
+@@ -323,12 +328,38 @@ class ComposeMainActivity : MetroAppCompatActivity() {
+         )
+     }
+ 
++    override fun onNewIntent(intent: Intent) {
++        super.onNewIntent(intent)
++        setIntent(intent)
++        consumeExternalCarbsIntent(intent)
++    }
++
++    private fun consumeExternalCarbsIntent(intent: Intent?) {
++        intent ?: return
++        val carbs = intent.getIntExtra("external_carbs", 0)
++        if (carbs <= 0) return
++        val notes = intent.getStringExtra("external_notes")
++        // Consume extras so a config change does not re-trigger the navigation
++        intent.removeExtra("external_carbs")
++        intent.removeExtra("external_notes")
++        pendingCarbsIntent.value = carbs to notes
++    }
++
+     @SuppressLint("BatteryLife")
+     @Composable
+     private fun AppContent(navController: NavHostController) {
+         // Trigger initial refresh when app content first appears (after init completes)
+         LaunchedEffect(Unit) { refreshOnResume() }
+ 
++        // CarbCam: route pending external carbs intent to the Bolus Wizard.
++        // Consumes the state and navigates to AppRoute.WizardDialog with prefilled carbs+notes.
++        LaunchedEffect(pendingCarbsIntent.value) {
++            pendingCarbsIntent.value?.let { (carbs, notes) ->
++                navController.navigate(AppRoute.WizardDialog.createRoute(carbs = carbs, notes = notes))
++                pendingCarbsIntent.value = null
++            }
++        }
++
+         // Track last navigated route as a Crashlytics custom key for crash reports
+         DisposableEffect(navController) {
+             val listener = NavController.OnDestinationChangedListener { _, dest, _ ->
+diff --git a/app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt b/app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt
+new file mode 100644
+index 0000000000..badbb0b53f
+--- /dev/null
++++ b/app/src/main/kotlin/app/aaps/activities/WizardLaunchActivity.kt
+@@ -0,0 +1,53 @@
++package app.aaps.activities
++
++import android.app.Activity
++import android.content.Intent
++import android.os.Bundle
++
++/**
++ * External entry point for 10BE CarbCam (de.be10.carbcam) to open the Bolus
++ * Wizard prefilled with a carb value. Whitelisted at callingPackage level;
++ * everyone else is silently dropped.
++ *
++ * Forwards to ComposeMainActivity with "external_carbs" / "external_notes"
++ * extras, which then navigates to AppRoute.WizardDialog.createRoute(carbs, notes).
++ * The user still has to confirm in the wizard - no silent bolus.
++ */
++class WizardLaunchActivity : Activity() {
++
++    companion object {
++        const val EXTRA_CARBS = "carbs"
++        const val EXTRA_NOTES = "notes"
++
++        private val ALLOWED_CALLERS = setOf(
++            "de.be10.carbcam",
++            "de.be10.carbcam.debug",
++            "de.be10.carbcam-debug",
++        )
++    }
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++
++        val caller = callingPackage ?: referrer?.host
++        if (caller !in ALLOWED_CALLERS) {
++            finish()
++            return
++        }
++
++        val carbs = intent.getIntExtra(EXTRA_CARBS, 0)
++        val notes = intent.getStringExtra(EXTRA_NOTES) ?: ""
++
++        if (carbs <= 0 || carbs > 80) {
++            finish()
++            return
++        }
++
++        startActivity(Intent(this, app.aaps.ComposeMainActivity::class.java).apply {
++            addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
++            putExtra("external_carbs", carbs)
++            putExtra("external_notes", notes)
++        })
++        finish()
++    }
++}
+-- 
+2.54.0 (Apple Git-157)
+
